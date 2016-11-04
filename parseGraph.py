@@ -1,29 +1,35 @@
+#! /usr/bin/python
 from sys import argv
 import json
+from tqdm import tqdm
 
 script,metaFile,inFile,outFile = argv
 
+def file_len(fname):
+    with open(fname) as f:
+        for i,l in enumerate(f):
+            pass
+    return i+1
+
 def generateNode(i):
     tempObj = {}
-    for k in meta[i]:
-        tempObj[k] = float(meta[i][k])
+    tempArr = meta[i].split("\t")
+    for j,attr in enumerate(header):
+        tempObj[attr] = tempArr[j]
     return {'id':i, "attr":tempObj}
 
 
 m = open(metaFile,"r")
 meta = []
 header = m.readline().rstrip().split("\t")
-for l in m.readlines():
-    tempArr = l.rstrip().split("\t")
-    tempObj = {}
-    for i in range(len(tempArr)):
-        tempObj[header[i]] = tempArr[i]
-    meta.append(tempObj)
+for i in tqdm(range(file_len(metaFile)-1)):
+    l = m.readline()
+    meta.append(l.rstrip())
 
 nodes = []
 edges = []
 f = open(inFile,"r")
-for line in f.readlines():
+for line in tqdm(f.readlines()):
     if (line[0]=="%"):
         continue
     source,target = line.rstrip().split(" ")

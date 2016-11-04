@@ -8,7 +8,10 @@ from sklearn.preprocessing import scale
 import matplotlib.pyplot as plt
 import argparse
 import os
-
+from datetime import datetime
+from elasticsearch import Elasticsearch
+from tqdm import tqdm
+es = Elasticsearch()
 #script,method,inFile,outFile = argv
 #inFile = "graph.json"
 
@@ -30,7 +33,7 @@ def kmeansCluster(attr):
     return kmeans
 
 def dbscanCluster(attr):
-    dbscan = cluster.DBSCAN()
+    dbscan = cluster.DBSCAN(eps=20)
     dbscan.fit(attr)
     return dbscan
 
@@ -50,10 +53,10 @@ def runPCA(args):
     subGraph = queryGraph(origGraph,nodeID)
 
     attrib = []
-    for i in range(len(subGraph["nodes"])):
+    for i in tqdm(range(len(subGraph["nodes"]))):
         tempArr = []
-        for k in subGraph["nodes"][i]["attr"]:
-            tempArr.append(subGraph["nodes"][i]["attr"][k])
+        for j,k in enumerate(subGraph["nodes"][i]["attr"]):
+            tempArr.append(float(subGraph["nodes"][i]["attr"][j]))
         attrib.append(tempArr)
     attrib = scale(np.array(attrib))
     cols = ["black" for x in range(len(attrib))]
@@ -61,20 +64,19 @@ def runPCA(args):
 
 def discretiseGraph(args):
     graph = loadGraph(args.graph)
-    attr = map(lambda x:x,graph["nodes"][0]["attr"])
-    for a in attr:
+    headers = map(lambda x: x.rstrip(),(open(args.headers).readlines()))
+    for i,attr in enumerate(tqdm(headers)):
         vals = []
         try:
-            vals = np.unique(map(lambda x: int(x["attr"][a]),graph["nodes"]))
-            print "OK!"
+            vals = np.unique(map(lambda x: int(x["attr"][i]),graph["nodes"]))
         except:
-            uniqueVals = list(set(map(lambda x: x["attr"][a],graph["nodes"])))
+            uniqueVals = list(set(map(lambda x: x["attr"][i],graph["nodes"])))
             print uniqueVals
             numericalVals =  list(range(0,len(uniqueVals)))
-            vals = map(lambda x: numericalVals[uniqueVals.index(x["attr"][a])], graph["nodes"])
+            vals = map(lambda x: numericalVals[uniqueVals.index(x["attr"][i])], graph["nodes"])
             print "Discretised!"
-        for i,val in enumerate(vals):
-            graph["nodes"][i]["attr"][a] = val
+        for j,val in enumerate(vals):
+            graph["nodes"][j]["attr"][i] = val
     o = open(args.out,"w")
     o.write(json.dumps(graph))
 
@@ -84,20 +86,19 @@ def clusterGraph(method,graph,nodeID,plot):
         print "ERROR:Not a method\nExiting"
         quit()
     attrib = []
-    for i in range(len(graph["nodes"])):
+    for i in tqdm(range(len(graph["nodes"]))):
         tempArr = []
-        for k in graph["nodes"][i]["attr"]:
-            tempArr.append(graph["nodes"][i]["attr"][k])
+        for j,k in enumerate(graph["nodes"][i]["attr"]):
+            tempArr.append(float(graph["nodes"][i]["attr"][j]))
         attrib.append(tempArr)
-
     attrib = scale(np.array(attrib))
     estimator = clusteringMethods[method](attrib)
+    cols = map(lambda x: plt.cm.Set3(np.linspace(0, 1, 10))[x] , estimator.labels_)
     if (plot==True):
-        cols = map(lambda x: plt.cm.Set3(np.linspace(0, 1, 6))[x] , estimator.labels_)
         plotPCA(attrib,cols)
     for i in range(len(estimator.labels_)):
-        graph["nodes"][i]["attr"]["cluster"] = int(estimator.labels_[i])
-        graph["nodes"][i]["col"] = ['red','green','blue',"purple","pink","violet"][int(estimator.labels_[i])]
+        graph["nodes"][i]["cluster"] = int(estimator.labels_[i])
+        graph["nodes"][i]["col"] = ["red","green","blue","grey","steelblue","purple","brows","pink"][int(estimator.labels_[i])]
     graph["nodes"][map(lambda x:x["id"],graph["nodes"]).index(nodeID)]["col"] = "yellow"
     return graph
 
@@ -125,12 +126,13 @@ def childifyGraph(graph,nodeID):
     newNodes = []
     newEdges = []
     newNodes.append(graph["nodes"].pop(map(lambda x:x["id"],graph["nodes"]).index(nodeID)))
-    for c in np.unique(map(lambda x: x["attr"]["cluster"],graph["nodes"])):
+    for c in np.unique(map(lambda x: x["cluster"],graph["nodes"])):
         cname = "cluster"+str(c)
         print "Collapsing " + cname
-        tempObj = {"id": cname}
+        col = ["red","green","blue","grey","steelblue","purple","brows","pink"][int(c)]
+        tempObj = {"id": cname,"col":col}
         tempObj["children"] = []
-        for child in filter(lambda x: x["attr"]["cluster"]==c, graph["nodes"]):
+        for child in filter(lambda x: x["cluster"]==c, graph["nodes"]):
             tempObj["children"].append(child)
         nodeSize = len(tempObj["children"])
         tempObj["size"] = nodeSize
@@ -151,6 +153,39 @@ def runExtraction(args):
     childGraph = childifyGraph(clusteredGraph,nodeID)
     o = open(outFile,"w")
     o.write(json.dumps(childGraph))
+
+def nodeID2index(nodeID):
+    body = "{\"query\": {\"bool\": {\"must\" : [{\"match\": { \"id\": \"%s\" }}]}}}" % args.nodeID
+    res = es.search(index="tb", doc_type="nodes", body=body)
+    return res["hits"]["hits"][0]["_id"]
+
+def retriveDoc(docID):
+    res = es.get(index="tb", doc_type="nodes", id=docID)
+    return res["_source"]
+
+
+def traverse(step,docID):
+    body = "{query: {bool: {should : [{match: { target: %s }},{match: { source: %s }}]}}}" % (docID,docID)
+    res = es.search(index="tb", doc_type="edges", from_=0, size=10000, body=body)
+    edgeTuples = [(x["_source"]["source"],x["_source"]["target"]) for x in  tqdm(res["hits"]["hits"])]
+    return edgeTuples
+
+def edgeTuple2arr(edgeTuples):
+    edges = []
+    for edge in tqdm(edgeTuples):
+        edges.append({"source":retriveDoc(edge[0])["id"],"target":retriveDoc(edge[1])["id"]})
+    return edges
+
+def loadElasticGraph(args):
+    docID = nodeID2index(args.nodeID)
+    print "Traversing graph:"
+    edgeTuples = traverse(1,docID)
+    print "Loading node documents"
+    nodeList = list(set(zip(*edgeTuples)[0]+zip(*edgeTuples)[1]))
+    nodes = [retriveDoc(x) for x in nodeList]
+    edges = edgeTuple2arr(edgeTuples)
+    o = open(args.out,"w")
+    o.write(json.dumps({"nodes":nodes,"edges":edges}))
 
 def loadGraph(inFile):
     return json.loads(open(inFile,"r").readline())
@@ -179,8 +214,14 @@ parser_fextract.set_defaults(func=fextract)
 
 parser_disc = subparsers.add_parser('discretise', help='Extract nodes linked to an ID and cluster', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 parser_disc.add_argument('graph',help='Graph in spesific JSON format')
+parser_disc.add_argument('headers',help='Graph in spesific JSON format')
 parser_disc.add_argument('out',help='OutFile')
 parser_disc.set_defaults(func=discretiseGraph)
+
+parser_disc = subparsers.add_parser('elastic', help='Extract nodes linked to an ID and cluster', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser_disc.add_argument('nodeID',help='nodeID')
+parser_disc.add_argument('out',help='Graph in spesific JSON format')
+parser_disc.set_defaults(func=loadElasticGraph)
 
 args = parser.parse_args()
 args.func(args)
